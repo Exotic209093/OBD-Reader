@@ -1,0 +1,41 @@
+{
+  "name": "obd-reader",
+  "version": "0.2.0",
+  "description": "OBD-II and VAG UDS fault scanner for ELM327/OBDLink cables: read-only scans, opt-in code clearing, live data and history",
+  "main": "src/main.js",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "author": "Exotic209093",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Exotic209093/OBD-Reader.git"
+  },
+  "homepage": "https://github.com/Exotic209093/OBD-Reader#readme",
+  "bugs": {
+    "url": "https://github.com/Exotic209093/OBD-Reader/issues"
+  },
+  "keywords": [
+    "obd2",
+    "elm327",
+    "obdlink",
+    "uds",
+    "vag",
+    "electron",
+    "diagnostics"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node scripts/launch.js",
+    "demo": "node scripts/launch.js --demo",
+    "test": "node --test \"test/*.test.js\"",
+    "scan": "node src/cli.js"
+  },
+  "dependencies": {
+    "serialport": "^13.0.0"
+  },
+  "devDependencies": {
+    "electron": "^45.0.0"
+  }
+}

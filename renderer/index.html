@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'" />
+    <title>OBD Reader</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <div class="brand">OBD Reader <span class="tag" title="Scans never change anything. Codes are only cleared when you press Clear codes and confirm.">read-only scan</span></div>
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-view="scan">Scan</button>
+        <button class="tab" data-view="live">Live</button>
+        <button class="tab" data-view="history">History</button>
+      </nav>
+      <div class="controls">
+        <select id="port" aria-label="Adapter port"></select>
+        <button id="refresh" class="ghost" title="Refresh ports">↻</button>
+      </div>
+    </header>
+
+    <main>
+      <!-- SCAN -->
+      <section id="view-scan" class="view">
+        <div class="toolbar">
+          <p id="status" class="status">Plug in the cable, turn the ignition on, then press Scan car.</p>
+          <div class="actions">
+            <button id="copy" class="ghost" hidden>Copy text</button>
+            <button id="save-txt" class="ghost" hidden>Save .txt</button>
+            <button id="save-pdf" class="ghost" hidden>Save PDF</button>
+            <button id="clear-open" class="clear-btn" hidden>Clear codes…</button>
+            <label class="check" title="Ask every diagnostic address for modules this app doesn't list, and re-check modules that stopped answering. Adds about half a minute. Done automatically on a car's first scan; later scans reuse what it found.">
+              <input type="checkbox" id="search" /> Search every address again
+            </label>
+            <button id="scan" class="primary">Scan car</button>
+          </div>
+        </div>
+
+        <div id="clear-panel" class="clear-panel no-print" hidden>
+          <h3>Clear fault codes</h3>
+          <p class="sub">Clears every code below in one go, including the engine's misfire counters. Clearing doesn't fix anything: a real fault comes straight back, and the engine's emissions readiness resets until the car has been driven. Get airbag, ABS and brake faults checked before clearing them. Engine off, ignition on.</p>
+          <div id="clear-list"></div>
+          <div class="actions">
+            <button id="clear-cancel" class="ghost">Cancel</button>
+            <button id="clear-run" class="clear-btn">Clear all codes</button>
+          </div>
+        </div>
+
+        <div id="report" hidden>
+          <div id="report-title" class="report-title"></div>
+          <div id="cleared"></div>
+          <div id="verdict" class="verdict"></div>
+          <div id="advice" class="advice"></div>
+          <div id="comparison"></div>
+
+          <h2>Overview</h2>
+          <section id="summary" class="cards"></section>
+
+          <h2>Engine fault memory</h2>
+          <div id="engine-faults"></div>
+
+          <h2>Misfires per cylinder <small>average over last 10 drives · this drive</small></h2>
+          <div id="misfires" class="misfires"></div>
+
+          <h2>Emissions readiness <small>engine self-tests</small></h2>
+          <div id="readiness" class="readiness"></div>
+
+          <h2>Other modules</h2>
+          <div id="module-list"></div>
+        </div>
+
+        <details id="log-wrap" class="no-print">
+          <summary>Raw adapter log</summary>
+          <pre id="log"></pre>
+        </details>
+      </section>
+
+      <!-- LIVE -->
+      <section id="view-live" class="view" hidden>
+        <div class="toolbar">
+          <p id="live-status" class="status">Start the engine, then press Start. Have a passenger watch the screen, not the driver.</p>
+          <div class="actions">
+            <button id="live-csv" class="ghost" hidden>Save CSV</button>
+            <button id="live-reset" class="ghost">Reset peaks</button>
+            <button id="live-toggle" class="primary">Start</button>
+          </div>
+        </div>
+        <div id="gauges" class="gauges"></div>
+        <div class="charts">
+          <div class="chart"><div class="k">RPM <span class="sub">last 60 s</span></div><canvas id="chart-rpm" height="120"></canvas></div>
+          <div class="chart"><div class="k">Boost (bar) <span class="sub">last 60 s</span></div><canvas id="chart-boost" height="120"></canvas></div>
+        </div>
+        <h2>Misfires this drive <small>count goes up when a cylinder misfires</small></h2>
+        <div id="live-misfires" class="live-misfires"></div>
+      </section>
+
+      <!-- HISTORY -->
+      <section id="view-history" class="view" hidden>
+        <h2>Battery <small>resting voltage, engine off · healthy 12.4-12.7 V</small></h2>
+        <div id="battery-trend" class="battery-trend"></div>
+        <h2>Saved scans</h2>
+        <div id="history-list"></div>
+      </section>
+    </main>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>
