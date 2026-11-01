@@ -84,6 +84,8 @@ won't answer; use VCDS or OBDeleven for those.
 
 ## Layout
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit together and the safety rules.
+
 - `src/elm.js` – serial transport for the adapter
 - `src/decode.js` – pure parsers (ISO-TP reassembly, DTCs, extended data)
 - `src/scan.js` – scan sequence and module list
@@ -95,7 +97,9 @@ won't answer; use VCDS or OBDeleven for those.
 
 Real adapter captures from other makes are the most useful contribution: run a scan, then attach
 the saved scan's `transcript` (from `%APPDATA%/obd-reader/history`) to an issue. **Replace the VIN
-first**, because it identifies your car. Run `npm test` before opening a pull request.
+first**, because it identifies your car. Run `npm test` before opening a pull request. Every pull request needs the tests to pass
+and a review from the maintainer before it can be merged. Report security problems privately:
+see [SECURITY.md](SECURITY.md).
 
 ## Licence
 

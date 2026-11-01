@@ -18,6 +18,8 @@ T3 Code sets `ELECTRON_RUN_AS_NODE=1`; `npm start`/`npm run demo` go through
 
 ## Map
 
+Full picture: `ARCHITECTURE.md`. Security policy: `SECURITY.md`. CI: `.github/workflows/test.yml` (npm test on Ubuntu + Windows).
+
 - `src/elm.js` serial transport; `src/decode.js` pure parsers (ISO-TP, DTCs, VAG extended data)
 - `src/makes.js` per-make profiles + `MAKES` table (VIN WMI -> profile, tool); add new brands here.
   Only `vag` is `verified`; gm/ford/hyundaiKia addresses are from public docs, not yet tried on a car
