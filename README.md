@@ -95,11 +95,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit together and the s
 
 ## Contributing
 
-Real adapter captures from other makes are the most useful contribution: run a scan, then attach
-the saved scan's `transcript` (from `%APPDATA%/obd-reader/history`) to an issue. **Replace the VIN
-first**, because it identifies your car. Run `npm test` before opening a pull request. Every pull request needs the tests to pass
-and a review from the maintainer before it can be merged. Report security problems privately:
-see [SECURITY.md](SECURITY.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md). Pull requests need passing tests and the maintainer's
+review before they're merged. Report security problems privately: see [SECURITY.md](SECURITY.md).
 
 ## Licence
 
