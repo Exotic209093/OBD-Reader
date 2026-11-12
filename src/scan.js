@@ -2,6 +2,7 @@
 // changes diagnostic session or requests security access. Clearing lives in
 // clear.js and is only ever run on request.
 const d = require('./decode');
+const isotp = require('./isotp');
 const { describe } = require('./codes');
 const { profileForVin } = require('./makes');
 
@@ -194,12 +195,35 @@ async function readFreezeFrame(elm) {
 // re-sending one that is already in effect.
 const AT_KEY = /^AT(Z|SP|SH|CRA|FCSH|FCSD|FCSM|ST|CF|CM|CAF|AT)/;
 
+// STN (OBDLink) commands that only identify the adapter. Every other ST
+// command is refused; STPX is only built by sendPayload() after its check.
+const ST_PASS = /^ST(?:I|DI)$/i;
+const STN_ID = /\bSTN\d{4}/i;
+
+const refuse = (cmd, why) => Object.assign(new Error(`Refusing to send ${cmd}: ${why}`), { code: 'REFUSED' });
+
+// Service bytes of a car-bound command, or null if it isn't plain hex. With
+// ATCAF0 the command is a raw frame: only single frames pass, and the service
+// follows the ISO-TP length byte. Longer requests go through sendPayload().
+function payloadOf(cmd, caf) {
+  const bytes = isotp.fromHex(cmd);
+  if (!bytes || caf) return bytes;
+  const len = bytes[0] & 0x0f;
+  if (bytes[0] >> 4 !== 0 || !len || len > bytes.length - 1) return null;
+  return bytes.slice(1, 1 + len);
+}
+
 // Wraps the adapter so every car-bound request is checked against an
-// allowlist of services and recorded (header, command, reply, ms) for replay.
+// allowlist and recorded (header, command, reply, ms) for replay.
+// allowed: service ids, or a predicate (payloadBytes, header) => bool that
+// sees the whole request (coding.js checks DIDs and addresses with it).
 function recorder(elm, transcript, allowed = READ_SIDS) {
   let header = '7DF';
   let caf = true;
+  let stn = null;
   const settings = new Map();
+  const permitted = (bytes) =>
+    Boolean(bytes && bytes.length) && (typeof allowed === 'function' ? allowed(bytes, header) === true : allowed.includes(bytes[0]));
   const track = (cmd, out) => {
     const key = (cmd.match(AT_KEY) || [])[1];
     if (!key) return;
@@ -210,21 +234,90 @@ function recorder(elm, transcript, allowed = READ_SIDS) {
     if (/\?/.test(out)) settings.delete(key);
     else settings.set(key, cmd);
   };
-  const rec = {
-    async send(cmd, timeoutMs) {
-      const isAt = cmd.startsWith('AT');
-      if (!isAt) {
-        // With ATCAF0 the first byte is the ISO-TP length, the service is next.
-        const sid = parseInt(caf ? cmd.slice(0, 2) : cmd.slice(2, 4), 16);
-        if (!allowed.includes(sid)) throw new Error(`Refusing to send ${cmd}: service not allowed here`);
+  // Every car-bound exchange goes into the transcript with its timing.
+  const exchange = async (cmd, timeoutMs) => {
+    const started = Date.now();
+    const out = await elm.send(cmd, timeoutMs);
+    transcript.push([header, cmd, out, Date.now() - started]);
+    return out;
+  };
+
+  // Manual ISO-TP for adapters without STPX: raw frames with ATCAF0, the first
+  // frame waits for the module's flow control, consecutive frames go out with
+  // ATR0 (no waiting) and the last with ATR1 to catch the reply. The trailing
+  // " 1" tells the ELM to return after one frame instead of waiting out ATST,
+  // which could be longer than the module waits for the next frame.
+  // UNVERIFIED on a real adapter and car: timing and clone behaviour untested.
+  async function sendFrames(bytes, timeoutMs) {
+    const frames = isotp.segment(bytes);
+    const flow = (out) => {
+      const fc = isotp.nextFlowControl(d.parseFrames(out).map((f) => f.data));
+      if (fc.status !== 'continue') throw Object.assign(new Error(isotp.flowError(fc.status)), { code: 'ISOTP' });
+      return fc;
+    };
+    let responses = true;
+    const setResponses = async (on) => {
+      if (on !== responses) await rec.send(on ? 'ATR1' : 'ATR0');
+      responses = on;
+    };
+    try {
+      await rec.send('ATCAF0');
+      let fc = flow(await exchange(`${isotp.toHex(frames[0])} 1`, timeoutMs));
+      let inBlock = 0;
+      let out = '';
+      for (let i = 1; i < frames.length; i++) {
+        const last = i === frames.length - 1;
+        const blockEnd = !last && fc.blockSize > 0 && ++inBlock === fc.blockSize;
+        await setResponses(last || blockEnd);
+        if (fc.stMinMs) await sleep(fc.stMinMs);
+        out = await exchange(`${isotp.toHex(frames[i])}${blockEnd ? ' 1' : ''}`, last || blockEnd ? timeoutMs : undefined);
+        if (blockEnd) {
+          fc = flow(out);
+          inBlock = 0;
+        }
       }
-      const started = Date.now();
+      return out;
+    } finally {
+      // A failed restore leaves `caf` false, so later plain requests are refused.
+      for (const c of ['ATCAF1', 'ATR1']) await rec.send(c).catch(() => {});
+    }
+  }
+
+  const rec = {
+    get stn() {
+      return stn;
+    },
+    async send(cmd, timeoutMs) {
+      if (/^ST/i.test(cmd)) {
+        if (!ST_PASS.test(cmd)) throw refuse(cmd, 'adapter command not allowed here');
+        const out = await elm.send(cmd, timeoutMs);
+        if (/^STI$/i.test(cmd)) stn = STN_ID.test(out);
+        return out;
+      }
+      if (!cmd.startsWith('AT')) {
+        if (!permitted(payloadOf(cmd, caf))) throw refuse(cmd, 'service not allowed here');
+        return exchange(cmd, timeoutMs);
+      }
       const out = await elm.send(cmd, timeoutMs);
-      if (isAt) track(cmd, out);
+      track(cmd, out);
       if (cmd.startsWith('ATSH')) header = cmd.slice(4);
       else if (cmd.startsWith('ATCAF')) caf = cmd.endsWith('1');
-      else if (!isAt) transcript.push([header, cmd, out, Date.now() - started]);
       return out;
+    },
+    // Sends one whole request (hex, no ISO-TP bytes) after checking all of it
+    // against the allowlist: a plain request when it fits one frame, else STPX
+    // on STN adapters (detected once with STI) or manual ISO-TP frames.
+    // UNVERIFIED on hardware: the STPX syntax below is from the STN manual and
+    // has not been tried on the OBDLink yet.
+    async sendPayload(hex, timeoutMs = 15000) {
+      const bytes = isotp.fromHex(hex);
+      if (!permitted(bytes)) throw refuse(hex, 'service not allowed here');
+      if (bytes.length > isotp.MAX_LENGTH) throw refuse(hex, 'request too long');
+      if (!caf) await rec.send('ATCAF1');
+      if (bytes.length <= 7) return exchange(isotp.toHex(bytes), timeoutMs);
+      if (stn === null) await rec.send('STI');
+      if (stn) return exchange(`STPX H:${header}, D:${isotp.toHex(bytes)}, R:1`, timeoutMs);
+      return sendFrames(bytes, timeoutMs);
     },
     // Send an adapter setting only if it isn't already in effect.
     async ensure(cmd) {

@@ -22,6 +22,10 @@ Treat these as vulnerabilities:
   or resets (11). The `READ_SIDS` allowlist in `src/scan.js` and `CLEAR_SIDS` in `src/clear.js`
   enforce this.
 - **Clearing codes without the user confirming** in the native dialog (`clear:run` in `src/main.js`).
+- **Coding that goes beyond its allowlist** (`codingAllowed` in `src/coding.js`): any write without
+  the native confirm (`coding:write`/`coding:restore`), without a backup saved first, to a module
+  that isn't codeable (engine, gearbox, ABS, airbags, power steering never are), to a DID outside
+  the catalogue, or any flashing (34-37), routine (31), reset (11) or comms-control (28) request.
 - **The renderer reaching Node or the serial port directly**, bypassing the preload bridge
   (`contextIsolation`, `sandbox`, the Content Security Policy in `renderer/index.html`).
 - **Path traversal or file writes outside** the history folder and the files the user picks.
