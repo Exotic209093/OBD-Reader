@@ -1,7 +1,9 @@
 // Fake adapter that replays replies captured from a 2016 Audi S1 on 2026-10-26.
 // Used by tests and by `npm start -- --demo`.
+const isotp = require('./isotp');
 
 const R = (...lines) => lines.join('\r');
+const h2 = (b) => b.toString(16).toUpperCase().padStart(2, '0');
 
 const ENGINE_LIST = R('7E8 03 7F 19 78', '7E8 10 0F 59 02 FF 00 3A E2', '7E8 21 60 00 3B 15 60 00 40', '7E8 22 77 65 AA AA AA AA AA');
 
@@ -20,6 +22,8 @@ const ext = (dtc, status, l2, l3, l4) =>
 const REPLIES = {
   ATI: 'ELM327 v1.4b',
   ATZ: 'ELM327 v1.4b',
+  // The demo adapter is an OBDLink (STN chip), so demo coding uses STPX.
+  STI: 'STN1130 v4.6.4',
   ATRV: '11.7V',
   '7DF:0100': R('SEARCHING...', '7E8 06 41 00 BE 3E A8 13'),
   '7DF:0101': '7E8 06 41 01 00 07 E1 21',
@@ -77,13 +81,134 @@ function simulatePids(pids, t = Date.now() / 1000) {
   return R(...lines);
 }
 
+// Simulated coding modules (synthetic, NOT recorded from the car): each keeps
+// its session and DID values, so a write shows up in later reads. Answers
+// 10 / 22 / 2E / 3E, sent plainly, via STPX, or as raw ISO-TP frames.
+const SIM_SIDS = [0x10, 0x22, 0x2e, 0x3e];
+
+class CodingSim {
+  // modules: { tx: { rx, dids: { 'F187': hex, '0600': hex } } }
+  // options: voltage (ATRV once a coding session asked STI: a charger is on),
+  //   flowControl (frames a module answers a first frame / block with),
+  //   pending (write answered 7F 2E 78 first), refuse (NRC for every write),
+  //   ignoreWrites (say yes but keep the old value), mangle (say yes but
+  //   store the last byte inverted).
+  constructor(modules, options = {}) {
+    this.modules = {};
+    for (const [tx, m] of Object.entries(modules)) this.modules[tx] = { rx: m.rx, session: 1, dids: { ...m.dids } };
+    this.options = { flowControl: [[0x30, 0x00, 0x00]], ...options };
+    this.inbound = null;
+    this.writes = [];
+  }
+
+  knows(tx) {
+    return Boolean(this.modules[tx]);
+  }
+
+  rx(tx) {
+    return this.modules[tx].rx;
+  }
+
+  // One request -> reply payloads, or null for services not simulated.
+  request(tx, req) {
+    const mod = this.modules[tx];
+    const [sid] = req;
+    const no = (nrc) => [[0x7f, sid, nrc]];
+    if (!SIM_SIDS.includes(sid)) return null;
+    if (sid === 0x10) {
+      if (req.length !== 2 || (req[1] !== 0x01 && req[1] !== 0x03)) return no(0x12);
+      mod.session = req[1];
+      return [[0x50, req[1], 0x00, 0x32, 0x01, 0xf4]];
+    }
+    if (sid === 0x3e) return req[1] === 0x00 ? [[0x7e, 0x00]] : no(0x12);
+    if (req.length < 3) return no(0x13);
+    const did = isotp.toHex(req.slice(1, 3));
+    const stored = mod.dids[did];
+    if (sid === 0x22) return req.length === 3 && stored ? [[0x62, req[1], req[2], ...isotp.fromHex(stored)]] : no(0x31);
+    if (mod.session !== 0x03) return no(0x7f);
+    if (!stored || did.startsWith('F1')) return no(0x31);
+    const data = req.slice(3);
+    if (data.length * 2 !== stored.length) return no(0x13);
+    if (this.options.refuse) return no(this.options.refuse);
+    this.writes.push({ tx, did, hex: isotp.toHex(data) });
+    if (this.options.mangle) data[data.length - 1] ^= 0xff;
+    if (!this.options.ignoreWrites) mod.dids[did] = isotp.toHex(data);
+    return [...(this.options.pending ? [[0x7f, 0x2e, 0x78]] : []), [0x6e, req[1], req[2]]];
+  }
+
+  // One raw frame (ATCAF0) -> { fc: frames } | { replies } | {} (nothing yet),
+  // or null when it isn't something simulated.
+  frame(tx, f) {
+    const type = f[0] >> 4;
+    if (type === 0) {
+      const replies = this.request(tx, f.slice(1, 1 + (f[0] & 0x0f)));
+      return replies && { replies };
+    }
+    const fcs = this.options.flowControl;
+    const cts = fcs.find((x) => x[0] === 0x30);
+    if (type === 1) {
+      this.inbound = cts ? { tx, len: ((f[0] & 0x0f) << 8) | f[1], data: f.slice(2, 8), sn: 1, block: 0, bs: cts[1] } : null;
+      return { fc: fcs };
+    }
+    const m = this.inbound;
+    if (type !== 2 || !m || m.tx !== tx) return {};
+    // A frame out of sequence drops the message, as a real module would.
+    if ((f[0] & 0x0f) !== (m.sn & 0x0f)) {
+      this.inbound = null;
+      return {};
+    }
+    m.sn++;
+    m.data.push(...f.slice(1, 8));
+    if (m.data.length >= m.len) {
+      this.inbound = null;
+      return { replies: this.request(tx, m.data.slice(0, m.len)) || [] };
+    }
+    if (m.bs && ++m.block === m.bs) {
+      m.block = 0;
+      return { fc: fcs };
+    }
+    return {};
+  }
+}
+
+const ascii = (s) => Buffer.from(s, 'latin1').toString('hex').toUpperCase();
+
+// Demo S1 modules 09 / 17 / 46 with made-up but plausible long codings
+// (30 / 18 / 10 bytes) and identification.
+const DEMO_MODULES = {
+  '70E': {
+    rx: '778',
+    dids: { F187: ascii('8X0907063AH'), F189: ascii('0560'), F197: ascii('BCM PQ25 H+4'), '0600': '0A180A3E0C00A00800040040E80C00102D08003000001400000000000000' },
+  },
+  '714': {
+    rx: '77E',
+    dids: { F187: ascii('8X0920930H'), F189: ascii('0711'), F197: ascii('KOMBI'), '0600': '090E2100000C000701000000000000000000' },
+  },
+  '70A': {
+    rx: '774',
+    dids: { F187: ascii('8X0959433AB'), F189: ascii('0104'), F197: ascii('KSG PQ25'), '0600': '018D08000C0000000000' },
+  },
+};
+
+const createDemoCoding = (options = {}) => new CodingSim(DEMO_MODULES, { voltage: '12.6V', ...options });
+
+// Shared by every demo adapter so a demo write shows up on later reads.
+let demoCoding = null;
+
 class ReplayElm {
   // delayMs mimics adapter round-trip time so the live demo doesn't spin.
-  constructor(onLog = () => {}, delayMs = 0, replies = REPLIES) {
+  // options.coding: a CodingSim (tests), or null for none. The default demo
+  // replies get the shared demo coding.
+  constructor(onLog = () => {}, delayMs = 0, replies = REPLIES, { coding } = {}) {
     this.header = '7DF';
     this.onLog = onLog;
     this.delayMs = delayMs;
     this.replies = replies;
+    this.caf = true;
+    this.responses = true;
+    this.codingSession = false;
+    if (coding !== undefined) this.sim = coding;
+    else this.sim = replies === REPLIES ? demoCoding || (demoCoding = createDemoCoding()) : null;
   }
 
   // Replay a scan saved with its transcript ([header, command, reply] rows).
@@ -104,13 +229,18 @@ class ReplayElm {
   async send(cmd) {
     if (this.delayMs) await new Promise((r) => setTimeout(r, this.delayMs));
     let out;
+    const simulated = () => (out = this.simulate(cmd)) !== null;
     if (cmd.startsWith('ATSH')) {
       this.header = cmd.slice(4);
       out = 'OK';
     } else if (cmd.startsWith('AT')) {
-      out = this.replies[cmd] || 'OK';
+      out = this.adapterCommand(cmd);
     } else if (this.replies[`${this.header}:${cmd}`]) {
       out = this.replies[`${this.header}:${cmd}`];
+    } else if (cmd.startsWith('ST')) {
+      out = this.stnCommand(cmd);
+    } else if (simulated()) {
+      // Simulated coding module answered.
     } else if (this.header === '7E0' && cmd.startsWith('06')) {
       out = this.replies[`7DF:${cmd}`] || 'NO DATA';
     } else if (this.header === '7E0' && cmd.startsWith('01')) {
@@ -121,6 +251,67 @@ class ReplayElm {
     this.onLog(`> ${cmd}\n${out}`);
     return out;
   }
+
+  adapterCommand(cmd) {
+    if (cmd === 'ATZ') {
+      // A reset puts everything back to defaults, as on a real adapter.
+      this.header = '7DF';
+      this.caf = true;
+      this.responses = true;
+    } else if (cmd === 'ATCAF0' || cmd === 'ATCAF1') {
+      this.caf = cmd === 'ATCAF1';
+    } else if (cmd === 'ATR0' || cmd === 'ATR1') {
+      this.responses = cmd === 'ATR1';
+    } else if (cmd === 'ATRV' && this.codingSession && this.sim && this.sim.options.voltage) {
+      // Demo coding pretends a charger is on: coding needs 12.4 V and the
+      // recorded scan was at 11.7 V. Only coding asks STI, so scans keep 11.7.
+      return this.sim.options.voltage;
+    }
+    return this.replies[cmd] || 'OK';
+  }
+
+  // STN commands: identity, and STPX on an STN adapter. An ELM says "?".
+  stnCommand(cmd) {
+    if (cmd === 'STI' || cmd === 'STDI') {
+      this.codingSession = true;
+      return this.replies[cmd] || '?';
+    }
+    const px = cmd.match(/^STPX H:([0-9A-F]{3}), D:((?:[0-9A-F]{2})+), R:1$/i);
+    if (!px || !/STN/.test(this.replies.STI || '') || !this.sim || !this.sim.knows(px[1].toUpperCase())) return '?';
+    const tx = px[1].toUpperCase();
+    return this.format(tx, this.sim.request(tx, isotp.fromHex(px[2])) || []);
+  }
+
+  // Coding requests to a simulated module, or null to fall back to replies.
+  simulate(cmd) {
+    if (!this.sim || !this.sim.knows(this.header)) return null;
+    // A trailing " 1" is the ELM's "wait for one reply" count.
+    const bytes = isotp.fromHex(cmd.split(' ')[0]);
+    if (!bytes) return null;
+    if (this.caf) {
+      const replies = this.sim.request(this.header, bytes);
+      return replies && this.format(this.header, replies);
+    }
+    const r = this.sim.frame(this.header, bytes);
+    if (!r) return null;
+    if (!this.responses) return '';
+    const rx = this.sim.rx(this.header);
+    if (r.fc) return R(...r.fc.map((f) => `${rx} ${[...f, ...Array(8 - f.length).fill(0xaa)].map(h2).join(' ')}`));
+    return r.replies ? this.format(this.header, r.replies, true) : 'NO DATA';
+  }
+
+  // Reply payloads as ELM output (headers on). With formatting on the ELM
+  // hides single-frame padding; raw (ATCAF0) shows all 8 bytes.
+  format(tx, payloads, raw = false) {
+    const rx = this.sim.rx(tx);
+    const lines = [];
+    for (const p of payloads) {
+      const frames = isotp.segment(p, 0xaa);
+      if (!raw && frames.length === 1) frames[0] = frames[0].slice(0, 1 + p.length);
+      for (const f of frames) lines.push(`${rx} ${f.map(h2).join(' ')}`);
+    }
+    return lines.length ? R(...lines) : 'NO DATA';
+  }
 }
 
-module.exports = { ReplayElm, simulatePids };
+module.exports = { ReplayElm, simulatePids, CodingSim, createDemoCoding };

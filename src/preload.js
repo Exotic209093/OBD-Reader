@@ -20,7 +20,14 @@ contextBridge.exposeInMainWorld('obd', {
   onLiveError: subscribe('live:error'),
   onLiveStopped: subscribe('live:stopped'),
 
-  historyList: () => ipcRenderer.invoke('history:list'),
+  // Coding (writes to the car). Progress arrives on the same channel as scans (onProgress).
+  codingPlatforms: () => ipcRenderer.invoke('coding:platforms'),
+  codingRead: (portPath) => ipcRenderer.invoke('coding:read', portPath),
+  codingWrite: (portPath, changes) => ipcRenderer.invoke('coding:write', portPath, changes),
+  codingBackups: (vin) => ipcRenderer.invoke('coding:backups', vin),
+  codingRestore: (portPath, backupId) => ipcRenderer.invoke('coding:restore', portPath, backupId),
+
+  historyList:() => ipcRenderer.invoke('history:list'),
   historyLoad: (id) => ipcRenderer.invoke('history:load', id),
   historyRemove: (id) => ipcRenderer.invoke('history:remove', id),
   markRepaired: (id, note) => ipcRenderer.invoke('repair:mark', id, note),

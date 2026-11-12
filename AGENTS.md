@@ -1,7 +1,7 @@
 # OBD Reader
 
 Electron app (plain HTML/JS, no build step) that does a read-only fault scan,
-opt-in code clearing, live data and scan history over an ELM327/OBDLink cable. Built for a 2016 Audi
+opt-in code clearing, opt-in coding (Features tab), live data and scan history over an ELM327/OBDLink cable. Built for a 2016 Audi
 S1 (VAG UDS over 11-bit CAN); adapter is the USB OBDLink on COM7 (FTDI 0403:6015).
 Also used on a 2013 Vauxhall Zafira B: its engine refuses
 UDS 19 (NRC 11); the GMLAN A9 path in `src/scan.js` is not yet confirmed on the car.
@@ -35,11 +35,22 @@ Full picture: `ARCHITECTURE.md`. Security policy: `SECURITY.md`. CI: `.github/wo
   with per-request ms as a 4th column, plus `report.timings` per step)
 - `recorder().ensure()` skips AT settings already in effect; `target()` uses it, so per-module setup is cheap
 - `src/main.js` Electron main + IPC; `src/preload.js` bridge; `renderer/` UI
+- Coding (design + safety rules: `docs/coding.md`; per-car findings + sources: `docs/coding-research.md`):
+  `src/coding.js` read/plan/write with its own per-request allowlist (`codingAllowed`);
+  `src/codingCatalog.js` platforms (VIN match, modules, `writable`, never-codeable addresses);
+  `src/codingFeatures.js` feature data (byte/mask/options, `verified`); `src/codingStore.js`
+  backups (`<userData>/coding/<VIN>/`, originals never overwritten); `src/isotp.js` multi-frame
+  transmit (`recorder().sendPayload`: STPX on STN, manual frames otherwise; neither tried on hardware yet)
 
 ## Rules
 
 - Scanning must stay read-only: `scan()` never sends 04/14; `READ_SIDS` enforces it and
   `test/scan.test.js` asserts it. Clearing only via `clearFaults()`, triggered from the UI after the
   native confirm in `main.js` (`clear:run`), and always followed by a rescan.
-- No session (10), security (27), writes (2E), routines (31) or resets (11), even for clearing.
+- Scans and clearing never use session (10), security (27), writes (2E), routines (31) or resets (11).
+- Coding is the only path that writes settings, via `writeCoding()` after the native confirm in `main.js`:
+  only `10 01`/`10 03`, `3E 00` and `2E` on catalogue DIDs of codeable modules; backup saved first,
+  battery >= 12.4 V, read back after. Never 11, 28, 31, 34-37 or 85 (no flashing, ever). Engine,
+  gearbox, ABS, airbags and power steering are never codeable (enforced in `codingCatalog.js`).
+  New features stay `verified: false` until written and read back on a real car.
 - VAG timestamp in 19 06 extended data is bit-packed from byte 9 bit 0 (see `parseVagExtData`).

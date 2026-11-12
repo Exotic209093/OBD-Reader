@@ -56,6 +56,15 @@ function showView(name) {
   for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.dataset.view === name);
   for (const v of document.querySelectorAll('.view')) v.hidden = v.id !== `view-${name}`;
   if (name === 'history') renderHistory();
+  // Only the Features tab can write to the car; say so in the header.
+  const writing = name === 'features';
+  const tag = $('mode-tag');
+  tag.textContent = writing ? 'can write to car' : 'read-only scan';
+  tag.classList.toggle('write', writing);
+  tag.title = writing
+    ? 'This tab can change settings in the car, but only after you review the changes and confirm. Every change is backed up first.'
+    : 'Scans never change anything. Codes are only cleared when you press Clear codes and confirm.';
+  if (writing) loadPlatforms();
 }
 
 // ---------- scan report ----------
@@ -577,9 +586,481 @@ async function saveLiveCsv() {
   }
 }
 
+// ---------- features (coding) ----------
+// The page only ever sends { featureId, value } or raw { module, did, hex }. The main
+// process plans from its own reading and asks for confirmation in a native dialog.
+
+const CATEGORY_ORDER = ['Lights', 'Locking', 'Instruments', 'Comfort', 'Infotainment'];
+const coding = {
+  reading: null,
+  pending: new Map(), // featureId -> value
+  raw: new Map(), // `${moduleKey}:${did}` -> { module, did, hex }
+  rawSel: null, // { key, index }
+  busy: false,
+  platformsLoaded: false,
+};
+
+const didKey = (d) => (typeof d === 'number' ? d : parseInt(d, 16)).toString(16).toUpperCase().padStart(4, '0');
+const hexByte = (n) => n.toString(16).toUpperCase().padStart(2, '0');
+const bytesOf = (hex) => hex.match(/../g) || [];
+const moduleOf = (key) => (coding.reading ? coding.reading.modules.find((m) => m.key === key) : null);
+const featureById = (id) => (coding.reading ? coding.reading.features.find((f) => f.id === id) : null);
+const canWrite = () => Boolean(coding.reading && coding.reading.platform && coding.reading.platform.writable);
+const optionLabel = (f, v) => {
+  const o = f.options.find((x) => x.value === v);
+  return o ? o.label : 'Unknown';
+};
+const rawChangedBytes = () => {
+  let n = 0;
+  for (const [key, r] of coding.raw) {
+    const [modKey, did] = key.split(':');
+    const orig = bytesOf(moduleOf(modKey).data[did]);
+    bytesOf(r.hex).forEach((b, i) => { if (b.toUpperCase() !== orig[i].toUpperCase()) n++; });
+  }
+  return n;
+};
+const pendingCount = () => coding.pending.size + rawChangedBytes();
+
+async function loadPlatforms() {
+  if (coding.platformsLoaded) return;
+  try {
+    const list = await window.obd.codingPlatforms();
+    coding.platformsLoaded = true;
+    $('coding-platforms').replaceChildren(
+      el('div', { class: 'k' }, 'Cars with a settings list'),
+      ...list.map((p) =>
+        el('div', { class: 'platform' }, el('span', {}, p.label), el('span', { class: `badge ${p.verified ? 'ok' : 'caution'}` }, p.verified ? 'checked on a real car' : 'not yet checked on a car'), p.writable ? null : el('span', { class: 'sub' }, 'look only, no changes yet')),
+      ),
+    );
+  } catch {
+    // The explainer works without the list.
+  }
+}
+
+// Why a feature's control is switched off, or null if it can be changed.
+function featureLock(f) {
+  const m = moduleOf(f.module);
+  if (!canWrite()) return 'Changes are switched off for this car until it has been checked on a real car.';
+  if (!f.available) return f.reason || 'Not available on this car.';
+  if (!m || !m.responded) return "This part of the car didn't answer when it was read.";
+  if (!m.codeable) return "This part of the car can't be changed with this app.";
+  if (f.current === null || f.current === undefined) return "The car has a setting here that the app doesn't recognise, so it is left alone.";
+  if (coding.raw.has(`${f.module}:${didKey(f.did)}`)) return 'Already being changed under Advanced: raw coding. Discard that change first.';
+  return null;
+}
+
+function featureRow(f) {
+  const lock = featureLock(f);
+  const row = el('div', { class: 'feature' });
+  const state = el('span', { class: 'f-state' });
+  const value = () => (coding.pending.has(f.id) ? coding.pending.get(f.id) : f.current);
+  const sync = () => {
+    const changed = coding.pending.has(f.id);
+    row.classList.toggle('changed', changed);
+    state.textContent = changed ? `${optionLabel(f, value())} (now ${optionLabel(f, f.current)})` : optionLabel(f, f.current);
+  };
+  const change = (v) => {
+    if (v === f.current) coding.pending.delete(f.id);
+    else coding.pending.set(f.id, v);
+    sync();
+    renderTray();
+    renderRaw();
+  };
+
+  let control;
+  if (f.options.length === 2) {
+    const [off, on] = f.options;
+    const input = el('input', { type: 'checkbox', 'aria-label': f.name });
+    input.checked = value() === on.value;
+    input.disabled = Boolean(lock);
+    input.addEventListener('change', () => change(input.checked ? on.value : off.value));
+    control = el('label', { class: 'switch' }, input, el('span', { class: 'slider' }));
+  } else {
+    const select = el('select', { 'aria-label': f.name, class: 'f-select' }, f.options.map((o) => el('option', { value: String(o.value) }, o.label)));
+    if (value() === null || value() === undefined) {
+      select.prepend(el('option', { value: '' }, 'Unknown'));
+      select.value = '';
+    } else {
+      select.value = String(value());
+    }
+    select.disabled = Boolean(lock);
+    select.addEventListener('change', () => change(Number(select.value)));
+    control = select;
+  }
+
+  const mod = moduleOf(f.module);
+  row.append(
+    el(
+      'div',
+      { class: 'f-info' },
+      el('div', { class: 'f-name' }, el('strong', {}, f.name), f.verified ? null : el('span', { class: 'badge caution', title: 'The location of this setting comes from public research and has not been tried on a real car yet.' }, 'unverified'), mod ? el('span', { class: 'chip' }, mod.name) : null),
+      f.description ? el('div', { class: 'sub' }, f.description) : null,
+      f.needs ? el('div', { class: 'sub' }, `Needs: ${f.needs}`) : null,
+      lock ? el('div', { class: 'lock' }, lock) : null,
+    ),
+    el('div', { class: 'f-control' }, state, control),
+  );
+  sync();
+  return row;
+}
+
+function renderCar() {
+  const r = coding.reading;
+  const box = $('coding-car');
+  box.hidden = !r;
+  if (!r) return;
+  const p = r.platform;
+  const answered = r.modules.filter((m) => m.responded).length;
+  const v = r.voltage;
+  const voltOk = typeof v === 'number' && v >= 12.4;
+  const tile = (k, main, sub, tone = '') => el('div', { class: 'card' }, el('div', { class: 'k' }, k), el('div', { class: `v ${tone}` }, main), sub ? el('div', { class: 'sub' }, sub) : null);
+  box.replaceChildren(
+    el(
+      'section',
+      { class: 'cards car-strip' },
+      tile('Car', p ? p.label : 'Not in the list', p ? (p.verified ? 'Checked on a real car' : 'Not yet checked on a real car') : 'No coding list for this car yet', p ? '' : 'warn'),
+      tile('Battery', typeof v === 'number' ? `${v.toFixed(1)} V` : '-', voltOk ? 'Good enough to write' : 'Needs 12.4 V or more to write', voltOk ? 'ok' : 'warn'),
+      tile('Parts of the car read', `${answered} of ${r.modules.length}`, answered < r.modules.length ? "The others didn't answer" : 'All answered'),
+      tile('VIN', r.vin || '-', ''),
+    ),
+  );
+}
+
+function renderList() {
+  const r = coding.reading;
+  const box = $('coding-list');
+  if (!r) return box.replaceChildren();
+  if (!r.platform) {
+    return box.replaceChildren(el('div', { class: 'panel' }, el('strong', {}, 'No coding list for this car yet'), el('p', { class: 'sub' }, "The app doesn't know which settings this car has, so nothing is shown here and nothing can be changed.")));
+  }
+  const out = [];
+  if (!r.platform.writable) {
+    out.push(el('div', { class: 'note' }, "Writes are off for this car until it has been checked on a real car. You can look at its settings, but not change them."));
+  }
+  if (!r.features.length) out.push(el('div', { class: 'none muted' }, 'No settings in the list for the parts of this car that answered.'));
+  const cats = [...new Set(r.features.map((f) => f.category))].sort((a, b) => {
+    const ia = CATEGORY_ORDER.indexOf(a);
+    const ib = CATEGORY_ORDER.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  });
+  for (const cat of cats) {
+    out.push(el('h2', {}, cat), el('div', { class: 'feature-group' }, r.features.filter((f) => f.category === cat).map(featureRow)));
+  }
+  box.replaceChildren(...out);
+}
+
+// ---- pending tray + review ----
+
+function featureBytes(f) {
+  const m = moduleOf(f.module);
+  const hex = m && m.data && m.data[didKey(f.did)];
+  if (!hex) return null;
+  const before = parseInt(bytesOf(hex)[f.byte], 16);
+  let after = before;
+  for (const g of coding.reading.features) {
+    if (coding.pending.has(g.id) && g.module === f.module && didKey(g.did) === didKey(f.did) && g.byte === f.byte) after = (after & ~g.mask & 0xff) | coding.pending.get(g.id);
+  }
+  return { before, after };
+}
+
+function renderReview() {
+  const rows = [];
+  for (const [id, value] of coding.pending) {
+    const f = featureById(id);
+    const b = featureBytes(f);
+    rows.push(el('tr', {}, el('td', {}, el('strong', {}, f.name), el('div', { class: 'sub' }, (moduleOf(f.module) || {}).name || f.module)), el('td', {}, optionLabel(f, f.current)), el('td', {}, optionLabel(f, value)), el('td', { class: 'code sub' }, b ? `byte ${f.byte}: ${hexByte(b.before)} → ${hexByte(b.after)}` : '-')));
+  }
+  for (const [key, r] of coding.raw) {
+    const [modKey, did] = key.split(':');
+    const m = moduleOf(modKey);
+    const orig = bytesOf(m.data[did]);
+    bytesOf(r.hex).forEach((b, i) => {
+      if (b.toUpperCase() === orig[i].toUpperCase()) return;
+      rows.push(el('tr', {}, el('td', {}, el('strong', {}, 'Raw coding'), el('div', { class: 'sub' }, m.name)), el('td', { class: 'code' }, orig[i].toUpperCase()), el('td', { class: 'code' }, b.toUpperCase()), el('td', { class: 'code sub' }, `data ${did.toUpperCase()}, byte ${i}`)));
+    });
+  }
+  $('coding-review').replaceChildren(
+    el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Setting'), el('th', {}, 'Now'), el('th', {}, 'After'), el('th', {}, 'Raw bytes'))), el('tbody', {}, rows)),
+    el('p', { class: 'sub' }, "Nothing is written yet. You'll be asked to confirm once more, and the old values are saved first."),
+  );
+}
+
+function renderTray() {
+  const n = pendingCount();
+  $('coding-tray').hidden = n === 0;
+  $('coding-tray-count').textContent = `${n} change${n === 1 ? '' : 's'} ready`;
+  if (!n) $('coding-review').hidden = true;
+  else if (!$('coding-review').hidden) renderReview();
+  $('coding-review-btn').textContent = $('coding-review').hidden ? 'Review' : 'Hide review';
+}
+
+function discardPending() {
+  coding.pending.clear();
+  coding.raw.clear();
+  coding.rawSel = null;
+  renderList();
+  renderRaw();
+  renderTray();
+}
+
+// ---- advanced: raw coding ----
+
+function setRawByte(m, did, orig, index, value) {
+  const key = `${m.key}:${did}`;
+  const cur = coding.raw.has(key) ? coding.raw.get(key).hex : orig;
+  const arr = bytesOf(cur);
+  arr[index] = hexByte(value);
+  const next = arr.join('');
+  if (next.toUpperCase() === orig.toUpperCase()) coding.raw.delete(key);
+  else coding.raw.set(key, { module: m.key, did, hex: next });
+  renderRaw();
+  renderList();
+  renderTray();
+}
+
+function rawBlock(m, did, orig) {
+  const key = `${m.key}:${did}`;
+  const cur = coding.raw.has(key) ? coding.raw.get(key).hex : orig;
+  const was = bytesOf(orig);
+  const now = bytesOf(cur);
+  const featureTouches = [...coding.pending.keys()].some((id) => {
+    const f = featureById(id);
+    return f && f.module === m.key && didKey(f.did) === did;
+  });
+  let why = null;
+  if (!canWrite()) why = 'Read only for this car.';
+  else if (!m.codeable) why = "This part of the car can't be changed with this app.";
+  else if (featureTouches) why = 'This data is already being changed from the list above. Discard that first.';
+  const sel = coding.rawSel && coding.rawSel.key === key ? coding.rawSel.index : null;
+
+  const grid = el(
+    'div',
+    { class: 'bytes' },
+    now.map((b, i) => {
+      const btn = el('button', { class: `byte${b.toUpperCase() !== was[i].toUpperCase() ? ' changed' : ''}${sel === i ? ' sel' : ''}`, title: `Byte ${i}` }, b.toUpperCase());
+      btn.addEventListener('click', () => {
+        coding.rawSel = sel === i ? null : { key, index: i };
+        renderRaw();
+      });
+      return btn;
+    }),
+  );
+  let bits = null;
+  if (sel !== null) {
+    const val = parseInt(now[sel], 16);
+    bits = el(
+      'div',
+      { class: 'bits' },
+      el('span', { class: 'sub' }, `Byte ${sel} (${hexByte(parseInt(was[sel], 16))} when read), bits 7 to 0`),
+      [7, 6, 5, 4, 3, 2, 1, 0].map((bit) => {
+        const input = el('input', { type: 'checkbox' });
+        input.checked = Boolean((val >> bit) & 1);
+        input.disabled = Boolean(why);
+        input.addEventListener('change', () => setRawByte(m, did, orig, sel, val ^ (1 << bit)));
+        return el('label', { class: 'bit' }, input, String(bit));
+      }),
+    );
+  }
+  return el('div', { class: 'raw-block' }, el('div', { class: 'raw-title' }, el('strong', {}, m.name), el('span', { class: 'sub' }, ` · data ${did.toUpperCase()} · ${was.length} bytes`)), why ? el('div', { class: 'lock' }, why) : null, grid, bits);
+}
+
+function renderRaw() {
+  const r = coding.reading;
+  const mods = r ? r.modules.filter((m) => m.responded && m.data && Object.keys(m.data).length) : [];
+  $('coding-raw').hidden = !mods.length;
+  $('coding-raw-body').replaceChildren(...mods.flatMap((m) => Object.entries(m.data).map(([did, hex]) => rawBlock(m, did, hex))));
+}
+
+// ---- actions ----
+
+function codingPort() {
+  const port = $('port').value;
+  if (!port) {
+    setStatus('coding-status', 'Plug in the USB cable first.', true);
+    return null;
+  }
+  if (!checkPortChoice()) {
+    setStatus('coding-status', $('status').textContent, true);
+    return null;
+  }
+  return port;
+}
+
+function setCodingBusy(b) {
+  coding.busy = b;
+  $('view-features').classList.toggle('working', b);
+  for (const id of ['coding-read', 'coding-backups-btn', 'coding-write', 'coding-discard']) $(id).disabled = b;
+  $('scan').disabled = b || liveState.running;
+}
+
+function renderCodingAll() {
+  renderCar();
+  renderList();
+  renderRaw();
+  renderTray();
+}
+
+async function readCar() {
+  if (coding.busy) return;
+  const port = codingPort();
+  if (!port) return;
+  if (pendingCount() && !confirm('Discard your pending changes and read the car again?')) return;
+  setCodingBusy(true);
+  setStatus('coding-status', 'Starting…');
+  try {
+    const reading = await window.obd.codingRead(port);
+    if (reading && reading.error) return setStatus('coding-status', reading.error, true);
+    coding.reading = reading;
+    coding.pending.clear();
+    coding.raw.clear();
+    coding.rawSel = null;
+    $('coding-intro').hidden = true;
+    $('coding-results').hidden = true;
+    $('coding-backups').hidden = true;
+    renderCodingAll();
+    const usable = reading.features.filter((f) => f.available).length;
+    setStatus('coding-status', reading.platform ? `Read ${new Date(reading.at).toLocaleTimeString()}. ${usable} setting${usable === 1 ? '' : 's'} available. Nothing has been changed.` : 'Read finished. No coding list for this car yet.');
+  } catch (err) {
+    setStatus('coding-status', cleanError(err), true);
+  } finally {
+    setCodingBusy(false);
+  }
+}
+
+function openBackupsButton() {
+  const b = el('button', { class: 'ghost' }, 'Open Backups');
+  b.addEventListener('click', toggleBackups);
+  return b;
+}
+
+function showResults(results, names, heading) {
+  const failed = results.filter((r) => !r.ok);
+  const box = $('coding-results');
+  box.replaceChildren(
+    el('h3', {}, failed.length ? 'Not everything went through' : `${heading}: written and checked`),
+    ...results.map((r) => {
+      const m = moduleOf(r.module);
+      const what = names.get(r.module);
+      return el(
+        'div',
+        { class: 'result' },
+        el('span', { class: r.ok ? 'ok' : 'bad' }, r.ok ? '✓ ' : '✗ '),
+        el('strong', {}, m ? m.name : String(r.module)),
+        what ? el('span', { class: 'sub' }, ` · ${what.join(', ')}`) : null,
+        el('div', { class: r.ok ? 'sub' : 'bad' }, r.ok ? 'Written, then read back from the car to check it.' : `Not written: ${r.error || 'the car did not accept it'}.${r.readback ? ' The car stored something different from what was sent. Use Backups to put the old setting back.' : ''}`),
+      );
+    }),
+    el('p', {}, failed.length ? "Anything marked ✗ is unchanged unless it says otherwise. You can restore earlier settings from Backups." : 'Now switch the ignition off, wait about 10 seconds, then switch it on again so the car picks up the new settings.'),
+    ...(failed.length ? [el('div', { class: 'actions' }, openBackupsButton())] : []),
+  );
+  box.hidden = false;
+  box.scrollIntoView({ block: 'start' });
+}
+
+async function writeNow() {
+  if (coding.busy || !pendingCount()) return;
+  const port = codingPort();
+  if (!port) return;
+  const changes = [
+    ...[...coding.pending].map(([featureId, value]) => ({ featureId, value })),
+    ...[...coding.raw.values()].map((r) => ({ module: r.module, did: r.did, hex: r.hex })),
+  ];
+  const names = new Map();
+  const note = (mod, name) => names.set(mod, [...(names.get(mod) || []), name]);
+  for (const id of coding.pending.keys()) note(featureById(id).module, featureById(id).name);
+  for (const r of coding.raw.values()) note(r.module, 'raw coding');
+  setCodingBusy(true);
+  setStatus('coding-status', 'Waiting for your confirmation…');
+  try {
+    const res = await window.obd.codingWrite(port, changes);
+    if (!res) return setStatus('coding-status', 'Cancelled. Nothing was written.');
+    coding.reading = res.reading;
+    discardPending();
+    renderCar();
+    showResults(res.results, names, 'Changes');
+    setStatus('coding-status', res.results.every((r) => r.ok) ? 'Done. The settings below are what the car now reports.' : 'Some changes did not go through. See the details above.', !res.results.every((r) => r.ok));
+    if (!$('coding-backups').hidden) loadBackups();
+  } catch (err) {
+    setStatus('coding-status', cleanError(err), true);
+  } finally {
+    setCodingBusy(false);
+  }
+}
+
+// ---- backups ----
+
+async function toggleBackups() {
+  const panel = $('coding-backups');
+  if (!panel.hidden) return (panel.hidden = true);
+  if (!coding.reading || !coding.reading.vin) return setStatus('coding-status', "Read the car first, so the app knows which car's backups to show.", true);
+  loadBackups();
+}
+
+async function loadBackups() {
+  try {
+    const list = await window.obd.codingBackups(coding.reading.vin);
+    renderBackups(Array.isArray(list) ? list : []);
+  } catch (err) {
+    setStatus('coding-status', cleanError(err), true);
+  }
+}
+
+function renderBackups(list) {
+  const panel = $('coding-backups');
+  panel.hidden = false;
+  const byModule = new Map();
+  for (const rec of [...list].sort((a, b) => String(b.at).localeCompare(String(a.at)))) {
+    const k = rec.name || rec.module;
+    byModule.set(k, [...(byModule.get(k) || []), rec]);
+  }
+  panel.replaceChildren(
+    el('h3', {}, 'Backups'),
+    el('p', { class: 'sub' }, 'Saved automatically: the original settings the first time each part of the car was read, and the settings before every change. Restore puts a saved version back on the car.'),
+    ...(byModule.size
+      ? [...byModule].map(([name, recs]) =>
+          el(
+            'div',
+            { class: 'backup-group' },
+            el('strong', {}, name),
+            recs.map((rec) => {
+              const restore = el('button', { class: 'ghost small' }, 'Restore…');
+              restore.disabled = !canWrite() || coding.busy;
+              restore.addEventListener('click', () => restoreBackup(rec));
+              const original = rec.original === true || /orig/i.test(String(rec.reason));
+              return el('div', { class: 'backup' }, el('span', { class: 'grow' }, new Date(rec.at).toLocaleString()), el('span', { class: `badge ${original ? 'ok' : ''}` }, original ? 'Original' : 'Before a change'), restore);
+            }),
+          ),
+        )
+      : [el('div', { class: 'none muted' }, 'No backups yet for this car.')]),
+  );
+}
+
+async function restoreBackup(rec) {
+  if (coding.busy) return;
+  const port = codingPort();
+  if (!port) return;
+  if (pendingCount() && !confirm('Discard your pending changes and restore this backup?')) return;
+  setCodingBusy(true);
+  setStatus('coding-status', 'Waiting for your confirmation…');
+  try {
+    const res = await window.obd.codingRestore(port, rec.id);
+    if (!res) return setStatus('coding-status', 'Cancelled. Nothing was changed.');
+    coding.reading = res.reading;
+    discardPending();
+    renderCar();
+    showResults(res.results, new Map([[rec.module, ['restored from backup']]]), 'Restore');
+    setStatus('coding-status', res.results.every((r) => r.ok) ? 'Restored. The settings below are what the car now reports.' : 'The restore did not fully go through. See the details above.', !res.results.every((r) => r.ok));
+    loadBackups();
+  } catch (err) {
+    setStatus('coding-status', cleanError(err), true);
+  } finally {
+    setCodingBusy(false);
+  }
+}
+
 // ---------- wiring ----------
 
-window.obd.onProgress((label) => setStatus('status', `${label}…`));
+window.obd.onProgress((label) => setStatus(currentView === 'features' ? 'coding-status' : 'status', `${label}…`));
 window.obd.onLog((line) => {
   $('log').textContent += `${line}\n`;
 });
@@ -589,7 +1070,15 @@ $('refresh').addEventListener('click', () => {
   loadPorts();
 });
 $('port').addEventListener('change', checkPortChoice);
-window.obd.onAppError((msg) => setStatus(currentView === 'live' ? 'live-status' : 'status', msg, true));
+window.obd.onAppError((msg) => setStatus(currentView === 'live' ? 'live-status' : currentView === 'features' ? 'coding-status' : 'status', msg, true));
+$('coding-read').addEventListener('click', readCar);
+$('coding-backups-btn').addEventListener('click', toggleBackups);
+$('coding-write').addEventListener('click', writeNow);
+$('coding-discard').addEventListener('click', discardPending);
+$('coding-review-btn').addEventListener('click', () => {
+  $('coding-review').hidden = !$('coding-review').hidden;
+  renderTray();
+});
 // Notice the cable being plugged in or out.
 setInterval(loadPorts, 3000);
 $('scan').addEventListener('click', runScan);

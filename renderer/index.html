@@ -8,11 +8,12 @@
   </head>
   <body>
     <header class="bar">
-      <div class="brand">OBD Reader <span class="tag" title="Scans never change anything. Codes are only cleared when you press Clear codes and confirm.">read-only scan</span></div>
+      <div class="brand">OBD Reader <span id="mode-tag" class="tag" title="Scans never change anything. Codes are only cleared when you press Clear codes and confirm.">read-only scan</span></div>
       <nav class="tabs" role="tablist">
         <button class="tab active" data-view="scan">Scan</button>
         <button class="tab" data-view="live">Live</button>
         <button class="tab" data-view="history">History</button>
+        <button class="tab" data-view="features">Features</button>
       </nav>
       <div class="controls">
         <select id="port" aria-label="Adapter port"></select>
@@ -101,6 +102,51 @@
         <div id="battery-trend" class="battery-trend"></div>
         <h2>Saved scans</h2>
         <div id="history-list"></div>
+      </section>
+
+      <!-- FEATURES (coding: the only tab that can write to the car) -->
+      <section id="view-features" class="view" hidden>
+        <div class="toolbar">
+          <p id="coding-status" class="status">Plug in the cable, turn the ignition on (engine off), then press Read car.</p>
+          <div class="actions">
+            <button id="coding-backups-btn" class="ghost">Backups</button>
+            <button id="coding-read" class="primary">Read car</button>
+          </div>
+        </div>
+
+        <div id="coding-intro" class="panel coding-intro">
+          <h3>Change hidden settings in your car</h3>
+          <p>Some cars have settings you can switch on or off, like lights that stay on after you lock the car. This tab reads those settings and lets you change them.</p>
+          <ul>
+            <li>It only changes saved settings. It never touches the software inside the car's computers.</li>
+            <li>The old setting is saved before every change, so you can always put it back from <strong>Backups</strong>.</li>
+            <li>Nothing is written until you press <strong>Write to car</strong> and confirm.</li>
+            <li>Engine off, ignition on, battery at 12.4 V or more. A battery charger is best. Don't unplug the cable while it works.</li>
+          </ul>
+          <div id="coding-platforms" class="platforms"></div>
+        </div>
+
+        <div id="coding-backups" class="panel" hidden></div>
+        <div id="coding-results" class="panel" hidden></div>
+        <div id="coding-car" hidden></div>
+        <div id="coding-list"></div>
+
+        <details id="coding-raw" class="coding-raw" hidden>
+          <summary>Advanced: raw coding</summary>
+          <p class="sub">For experts. This is the raw data stored in each module. A wrong value can make things in the car misbehave; the list above is safer. Click a byte to change its individual bits. Changes go into the same pending list and need the same confirmation.</p>
+          <div id="coding-raw-body"></div>
+        </details>
+
+        <div id="coding-tray" class="tray" hidden>
+          <div id="coding-review" class="review" hidden></div>
+          <div class="tray-bar">
+            <strong id="coding-tray-count"></strong>
+            <span class="grow"></span>
+            <button id="coding-discard" class="ghost">Discard</button>
+            <button id="coding-review-btn" class="ghost">Review</button>
+            <button id="coding-write" class="write-btn">Write to car…</button>
+          </div>
+        </div>
       </section>
     </main>
 

@@ -30,6 +30,7 @@ to the main process through a small preload bridge.
 | Decoding | `src/decode.js` | Pure functions, no I/O: ISO-TP reassembly, DTCs (SAE, VAG, GMLAN, KWP), readiness, freeze frame, misfire counters, VAG extended data. |
 | Car knowledge | `src/makes.js`, `src/codes.js` | Per-make profiles picked from the VIN (module addresses, protocols to try, suggested dealer tool) and the fault-code knowledge base. |
 | Sequences | `src/scan.js`, `src/clear.js`, `src/live.js` | What to ask, in what order: full scan, clear all codes, live polling. |
+| Coding | `src/coding.js`, `src/codingCatalog.js`, `src/codingFeatures.js`, `src/codingStore.js`, `src/isotp.js` | Read module settings, plan and write changes (Features tab), backups and restore. |
 | Interpretation | `src/advice.js`, `src/history.js`, `src/reportText.js` | Verdict and advice, scan history and comparison, per-car memory (found modules, repairs), text export. |
 | App shell | `src/main.js`, `src/preload.js`, `renderer/` | Window, IPC handlers, native confirm dialogs, UI. |
 
@@ -51,7 +52,14 @@ to the main process through a small preload bridge.
 - **Clearing is separate.** `clearFaults()` uses its own `CLEAR_SIDS` allowlist (adds 04 and 14), only runs
   after the native dialog in `main.js`, checks the targets it gets from the renderer, and is always
   followed by a rescan.
-- **Never:** session changes (10), security access (27), writes (2E), routines (31) or resets (11).
+- **Scans and clearing never** change session (10), request security access (27), write (2E),
+  run routines (31) or reset (11).
+- **Coding is separate again.** `src/coding.js` checks every request (header and full payload) with
+  `codingAllowed`: read services, `10 01`/`10 03`, `3E 00`, and `2E` only for a catalogue DID on a
+  codeable module of a writable platform. Before each write it checks the VIN, the battery
+  (>= 12.4 V) and that the data hasn't changed since it was read, and saves a backup; after, it reads
+  back. Flashing services (34-37), routines (31), resets (11) and comms control (28) are never allowed.
+  Details: `docs/coding.md`.
 - **Renderer is untrusted:** `contextIsolation`, `sandbox`, no Node in the page, a strict CSP, and every
   IPC argument is checked in the main process.
 
